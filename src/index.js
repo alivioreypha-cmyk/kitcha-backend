@@ -8,6 +8,7 @@ const foodRoutes       = require('./routes/foods');
 const aiRoutes         = require('./routes/ai');
 const profileRoutes    = require('./routes/profile');
 const shelflifeRoutes  = require('./routes/shelflife');
+const barcodeRoutes    = require('./routes/barcode');
 
 const app = express();
 
@@ -16,7 +17,7 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', app: 'Kitch-A Backend', version: '1.1.0' });
+  res.json({ status: 'ok', app: 'Kitch-A Backend', version: '1.2.0' });
 });
 
 app.use('/auth',       authRoutes);
@@ -24,6 +25,7 @@ app.use('/foods',      foodRoutes);
 app.use('/ai',         aiRoutes);
 app.use('/profile',    profileRoutes);
 app.use('/shelflife',  shelflifeRoutes);
+app.use('/barcode',    barcodeRoutes);
 
 app.use((err, req, res, next) => {
   console.error('[ERROR]', err);
