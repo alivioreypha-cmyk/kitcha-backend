@@ -1,5 +1,4 @@
 // prisma/schema.prisma
-// Jalankan: npx prisma db push  (untuk sync ke Supabase)
 
 generator client {
   provider = "prisma-client-js"
@@ -21,6 +20,8 @@ model User {
   updatedAt    DateTime @updatedAt
 
   foods FoodItem[]
+
+  @@index([email])
 }
 
 model FoodItem {
@@ -35,4 +36,9 @@ model FoodItem {
 
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Index utama: query getAllFoods selalu filter by userId + sort by expiryDate
+  @@index([userId, expiryDate])
+  // Index tambahan: filter by wasteCategory per user
+  @@index([userId, wasteCategory])
 }

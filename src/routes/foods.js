@@ -1,39 +1,70 @@
 // src/routes/foods.js
-// Semua endpoint butuh JWT — persis seperti DBHelper di Flutter sebelumnya
+// Versi optimized:
+// - Select field spesifik (tidak fetch passwordHash dll)
+// - Pagination support
+// - Filter by expiry status
+// - Batch insert support
 
 const router      = require('express').Router();
 const prisma      = require('../lib/prisma');
 const requireAuth = require('../middleware/auth');
 
-// Semua route di sini wajib login
 router.use(requireAuth);
 
-// ── GET /foods  → getAllFoods ────────────────────────────────────
+// ── GET /foods ────────────────────────────────────────────────────
+// Query param opsional:
+//   ?status=expiring   → hanya yang exp dalam 3 hari
+//   ?status=expired    → hanya yang sudah exp
+//   ?limit=50&offset=0 → pagination
 router.get('/', async (req, res) => {
   try {
+    const { status, limit = '200', offset = '0' } = req.query;
+    const now = new Date();
+
+    // Build where clause berdasarkan filter
+    let expiryFilter = {};
+    if (status === 'expired') {
+      expiryFilter = { expiryDate: { lt: now } };
+    } else if (status === 'expiring') {
+      const threeDaysLater = new Date(now);
+      threeDaysLater.setDate(threeDaysLater.getDate() + 3);
+      expiryFilter = { expiryDate: { gte: now, lte: threeDaysLater } };
+    }
+
     const foods = await prisma.foodItem.findMany({
-      where: { userId: req.userId },
+      where: {
+        userId: req.userId,
+        ...expiryFilter,
+      },
+      // Hanya select field yang dibutuhkan Flutter
+      select: {
+        id: true,
+        name: true,
+        expiryDate: true,
+        imagePath: true,
+        storageRecommendation: true,
+        wasteCategory: true,
+      },
       orderBy: { expiryDate: 'asc' },
+      take: Math.min(parseInt(limit), 500), // max 500 per request
+      skip: parseInt(offset),
     });
 
-    // Konversi ke format yang sama dengan FoodItem.fromMap() di Flutter
-    const result = foods.map(f => ({
-      id: f.id,
-      name: f.name,
-      expiryDate: f.expiryDate.toISOString(),
-      imagePath: f.imagePath,
-      storageRecommendation: f.storageRecommendation,
-      wasteCategory: f.wasteCategory,
-    }));
-
-    res.json({ success: true, data: result });
+    res.json({
+      success: true,
+      data: foods.map(f => ({
+        ...f,
+        expiryDate: f.expiryDate.toISOString(),
+      })),
+      total: foods.length,
+    });
   } catch (err) {
     console.error('[GET /foods]', err);
     res.status(500).json({ success: false, message: 'Gagal mengambil data makanan' });
   }
 });
 
-// ── POST /foods  → insertFood ────────────────────────────────────
+// ── POST /foods ────────────────────────────────────────────────────
 router.post('/', async (req, res) => {
   try {
     const { id, name, expiryDate, imagePath, storageRecommendation, wasteCategory } = req.body;
@@ -52,21 +83,21 @@ router.post('/', async (req, res) => {
         wasteCategory: wasteCategory || 'loading',
         userId: req.userId,
       },
+      select: {
+        id: true,
+        name: true,
+        expiryDate: true,
+        imagePath: true,
+        storageRecommendation: true,
+        wasteCategory: true,
+      },
     });
 
     res.status(201).json({
       success: true,
-      data: {
-        id: food.id,
-        name: food.name,
-        expiryDate: food.expiryDate.toISOString(),
-        imagePath: food.imagePath,
-        storageRecommendation: food.storageRecommendation,
-        wasteCategory: food.wasteCategory,
-      },
+      data: { ...food, expiryDate: food.expiryDate.toISOString() },
     });
   } catch (err) {
-    // Conflict: ID sudah ada — upsert
     if (err.code === 'P2002') {
       return res.status(409).json({ success: false, message: 'ID makanan sudah ada' });
     }
@@ -75,14 +106,51 @@ router.post('/', async (req, res) => {
   }
 });
 
-// ── PUT /foods/:id  → updateFood ────────────────────────────────
+// ── POST /foods/batch ─────────────────────────────────────────────
+// Insert banyak makanan sekaligus (misal dari import)
+// Body: { foods: [{ id, name, expiryDate, ... }] }
+router.post('/batch', async (req, res) => {
+  try {
+    const { foods } = req.body;
+    if (!Array.isArray(foods) || foods.length === 0) {
+      return res.status(400).json({ success: false, message: 'foods harus array dan tidak boleh kosong' });
+    }
+    if (foods.length > 50) {
+      return res.status(400).json({ success: false, message: 'Maksimal 50 item per batch' });
+    }
+
+    const created = await prisma.foodItem.createMany({
+      data: foods.map(f => ({
+        id: f.id,
+        name: f.name,
+        expiryDate: new Date(f.expiryDate),
+        imagePath: f.imagePath || '',
+        storageRecommendation: f.storageRecommendation || '',
+        wasteCategory: f.wasteCategory || 'loading',
+        userId: req.userId,
+      })),
+      skipDuplicates: true,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: `${created.count} makanan berhasil ditambahkan`,
+      count: created.count,
+    });
+  } catch (err) {
+    console.error('[POST /foods/batch]', err);
+    res.status(500).json({ success: false, message: 'Gagal batch insert makanan' });
+  }
+});
+
+// ── PUT /foods/:id ────────────────────────────────────────────────
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Pastikan makanan milik user ini
     const existing = await prisma.foodItem.findFirst({
       where: { id, userId: req.userId },
+      select: { id: true },
     });
     if (!existing) {
       return res.status(404).json({ success: false, message: 'Makanan tidak ditemukan' });
@@ -99,18 +167,19 @@ router.put('/:id', async (req, res) => {
         ...(storageRecommendation !== undefined && { storageRecommendation }),
         ...(wasteCategory      && { wasteCategory }),
       },
+      select: {
+        id: true,
+        name: true,
+        expiryDate: true,
+        imagePath: true,
+        storageRecommendation: true,
+        wasteCategory: true,
+      },
     });
 
     res.json({
       success: true,
-      data: {
-        id: updated.id,
-        name: updated.name,
-        expiryDate: updated.expiryDate.toISOString(),
-        imagePath: updated.imagePath,
-        storageRecommendation: updated.storageRecommendation,
-        wasteCategory: updated.wasteCategory,
-      },
+      data: { ...updated, expiryDate: updated.expiryDate.toISOString() },
     });
   } catch (err) {
     console.error('[PUT /foods/:id]', err);
@@ -118,13 +187,14 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// ── DELETE /foods/:id  → deleteFood ─────────────────────────────
+// ── DELETE /foods/:id ─────────────────────────────────────────────
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
     const existing = await prisma.foodItem.findFirst({
       where: { id, userId: req.userId },
+      select: { id: true },
     });
     if (!existing) {
       return res.status(404).json({ success: false, message: 'Makanan tidak ditemukan' });
@@ -135,6 +205,34 @@ router.delete('/:id', async (req, res) => {
   } catch (err) {
     console.error('[DELETE /foods/:id]', err);
     res.status(500).json({ success: false, message: 'Gagal menghapus makanan' });
+  }
+});
+
+// ── DELETE /foods/bulk ────────────────────────────────────────────
+// Hapus banyak makanan sekaligus
+// Body: { ids: ["id1", "id2", ...] }
+router.delete('/bulk', async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: 'ids harus array dan tidak boleh kosong' });
+    }
+
+    const result = await prisma.foodItem.deleteMany({
+      where: {
+        id: { in: ids },
+        userId: req.userId, // pastikan hanya hapus milik user ini
+      },
+    });
+
+    res.json({
+      success: true,
+      message: `${result.count} makanan berhasil dihapus`,
+      count: result.count,
+    });
+  } catch (err) {
+    console.error('[DELETE /foods/bulk]', err);
+    res.status(500).json({ success: false, message: 'Gagal bulk delete makanan' });
   }
 });
 
